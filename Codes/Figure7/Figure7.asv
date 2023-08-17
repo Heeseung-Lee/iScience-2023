@@ -1,0 +1,346 @@
+clear all; close all; clc
+
+fmribold    = load('../../Data/preprocessed/ROIbold.mat');
+fmribehav   = load('/Volumes/ROOT/CSNL_temp/HL/results/RTPupildACC/Data_and_Codes/Data/raw/fMRI/behavior.mat');
+DU          = load('../../Data/BMBU/DecisionUncertainty.mat');
+
+%%
+
+nTB     = 5;
+imodel  = 1;
+nSub    = 18;
+nroi    = length(fmribold.iboldname);
+nT      = 26;
+nR      = 8;
+itr     = 6;
+anT     = nT*nR;
+anf     = anT*itr;
+itRun   = 1+nT*(0:nR-1);
+itr4    = 4;
+
+areg = NaN(anf,nSub);
+for iSub = 1:nSub
+    iu                  = DU.DU{iSub}(:);
+    ireg                = ones(anf,1);
+    for iT = 1:anT
+        ju              = iu(iT);
+        if isnan(ju) % if uncertainty is not calculated, extract the missing trial
+            jtr         = itr*(iT-1) + (1:6);
+            ireg(jtr)   = NaN;
+        end
+        if ismember(iT,itRun) % the first trial is not analyzed
+            jtr         = itr*(iT-1) + (1:6);
+            ireg(jtr)   = NaN;
+        end
+    end
+    areg(:,iSub)        = ireg;
+end
+areg    = areg == 1;
+
+% ready bold
+tbolds = cell(nSub,nroi);
+for iroi = 1:nroi
+    for iSub = 1:nSub
+        jbold                   = fmribold.ibold{iSub,iroi}';
+        inan                    = isnan(sum([areg(:,iSub) jbold],2)); % the first trial is not analyzed
+        for iR = 1:nR % run-wise standardization (preprocessing of BOLD. In preprocessing, all trials were included)
+            boldInd		        = (6*(iR-1)*26+7):6*iR*26;
+            jbold(boldInd,:)    = zscore(jbold(boldInd,:));
+        end
+        jbold(inan,:)           = NaN;
+        tbold                   = NaN(anT,itr);
+        for iT = 1:anT
+            iInd                = 6*(iT-1)+(1:itr);
+            tbold(iT,:)         = mean(jbold(iInd,:),2);
+        end
+        tbold                   = reshape(mean(tbold(:,4),2),nT,nR); % average TR4,5
+        tbolds{iSub,iroi}       = tbold;
+    end
+end
+
+%%
+
+
+for iroi = 1:nroi
+
+    coefs       = NaN(nSub,2*nTB + 1);
+    coef_xhat   = NaN(nSub,4);
+    RTs         = NaN(3,3,nSub);
+    R2          = NaN(nSub,4);
+    v_cspspc    = NaN(nSub,6);
+    v_cspspc_signed = NaN(nSub,6);
+    for iSub = 1:nSub
+        iRT         = tbolds{iSub,iroi}(:);
+        iu          = DU.DU{iSub,1}(:);
+        istm        = fmribehav.stimulus{iSub};
+        ichc        = fmribehav.choice{iSub};
+        nR          = size(istm,2);
+
+        % Xhat
+        pstm        = [NaN(1,nR); istm(1:end-1,:)];
+        pchc        = [NaN(1,nR); ichc(1:end-1,:)];
+        icong       = istm(:).*ichc(:);
+        pcong       = pstm(:).*ichc(:);
+        pccong      = pchc(:).*ichc(:);
+        inan        = isnan(sum([iu iRT icong pcong pccong],2));
+        jRT         = zscore(iRT(~inan,:));
+        icong       = icong(~inan) + 2;
+        pcong       = pcong(~inan) + 2;
+        pccong      = pccong(~inan);
+        for i = 1:3
+            for p = 1:3
+                iInd            = (icong == i) & (pcong == p);
+                RTs(i,p,iSub)   = mean(jRT(iInd));
+            end
+        end
+        coef_xhat(iSub,:)   = glmfit(zscore([icong pcong pccong]),jRT);
+
+        % variance partitioning
+        y       = jRT;
+        sst     = sum((y - mean(y)).^2);
+        for j = 1:4
+            switch j
+                case 1
+                    x = zscore([icong pcong pccong]);
+                case 2
+                    x = zscore([pcong pccong]);
+                case 3
+                    x = zscore([icong pccong]);
+                case 4
+                    x = zscore([icong pcong]);
+            end
+            icoef       = glmfit(x,y);
+            yhat        = glmval(icoef,x,"identity");
+            ssr         = sum((y - yhat).^2);
+            R2(iSub,j)  = 1 - ssr/sst;
+        end
+
+        % regression
+        is = istm(:).*ichc(:);
+        ic = [];
+        for iTB = 1:nTB
+            ps  = [NaN(iTB,nR); istm(1:end-iTB,:)];
+            pc  = [NaN(iTB,nR); ichc(1:end-iTB,:)];
+            is  = cat(2,is,ps(:).*ichc(:));
+            ic  = cat(2,ic,pc(:).*ichc(:));
+        end
+
+        x                   = [is ic];
+        iIndFirst           = [ones(1,nR); zeros(nT-1,nR)];
+        iIndFirst           = iIndFirst(:)==1;
+        x(iIndFirst,:)      = [];
+        iRT(iIndFirst,:)    = [];
+
+        inan            = sum(isnan(x),2) == size(x,2) | isnan(iRT);
+        x(inan,:)       = NaN;
+        x               = (x - mean(x,'omitnan'))./std(x,'omitnan');
+        x(isnan(x))     = 0;
+        x(inan,:)       = [];
+        x               = zscore(x);
+        y               = zscore(iRT(~inan));
+
+        jcoef           = glmfit(x,y);
+        coefs(iSub,:)   = jcoef(2:end);
+
+        % variance partitioning
+
+        iRT                 = tbolds{iSub,iroi};
+        pRT                 = [NaN(1,nR); iRT(1:end-1,:)];
+        pstm                = [NaN(1,nR); istm(1:end-1,:)];
+        pchc                = [NaN(1,nR); ichc(1:end-1,:)];
+        pstm2               = [NaN(2,nR); istm(1:end-2,:)];
+        pchc2               = [NaN(2,nR); ichc(1:end-2,:)];
+        icong               = istm.*ichc;
+        pcong               = pstm.*ichc;
+        pccong              = pchc.*ichc;
+        pcong2              = pstm2.*ichc;
+        pccong2             = pchc2.*ichc;
+
+        nT                  = size(iRT,1);
+        linx                = 1:nT;
+        linRT               = NaN(size(iRT));
+        quaRT               = NaN(size(iRT));
+        for iR = 1:nR
+            iglm            = glmfit(linx,iRT(:,iR));
+            linRT(:,iR)     = glmval(iglm,linx,'identity');
+            iglm            = glmfit(linx.^2,iRT(:,iR));
+            quaRT(:,iR)     = glmval(iglm,linx.^2,'identity');
+        end
+
+        ireg                = [iRT(:) pRT(:) linRT(:) icong(:) pcong(:) pcong2(:) pccong(:) pccong2(:)];
+        ivalid              = ~isnan(sum(ireg,2));
+        ireg                = zscore(ireg(ivalid,:));
+        y                   = ireg(:,1);
+        prt                 = ireg(:,2);
+        trd                 = ireg(:,3);
+        cs                  = ireg(:,4);
+        ps                  = ireg(:,5);
+        pc                  = ireg(:,7);
+
+        sst                 = sum((y - mean(y)).^2);
+        in                  = length(y);
+
+        for icase = 1:6
+            switch icase
+                case 1
+                    x           = [prt trd cs ps pc];
+                case 2
+                    x           = [trd cs ps pc];
+                case 3
+                    x           = [prt cs ps pc];
+                case 4
+                    x           = [prt trd ps pc];
+                case 5
+                    x           = [prt trd cs pc];
+                case 6
+                    x           = [prt trd cs ps];
+            end
+            ifull               = glmfit(x,y);
+            ssr                 = sum((y - glmval(ifull,x,"identity")).^2);
+            r2_model            = 1 - ssr/sst;
+            if icase == 1
+                r2_full                 = r2_model;
+                v_cspspc(iSub,icase)    = r2_full;
+            else
+                v_cspspc(iSub,icase)    = r2_full - r2_model;
+            end
+        end
+
+        % BOLD time course
+        coefs_cong  = NaN(nSub,itr,3);
+        jbold                   = fmribold.ibold{iSub,iroi}';
+        inan                    = isnan(sum([areg(:,iSub) jbold],2)); % the first trial is not analyzed
+        for iR = 1:nR % run-wise standardization (preprocessing of BOLD. In preprocessing, all trials were included)
+            boldInd		        = (6*(iR-1)*26+7):6*iR*26;
+            jbold(boldInd,:)    = zscore(jbold(boldInd,:));
+        end
+        jbold(inan,:)           = NaN;
+        kbold                   = NaN(anT,itr);
+        for iT = 1:anT
+            iInd                = 6*(iT-1)+(1:itr);
+            kbold(iT,:)         = mean(jbold(iInd,:),2);
+        end
+
+        nR      = size(istm,2);
+        pstm    = [NaN(1,nR); istm(1:end-1,:)];
+        pchc    = [NaN(1,nR); ichc(1:end-1,:)];
+        icong   = istm(:).*ichc(:);
+        pcong   = pstm(:).*ichc(:);
+        pccong  = pchc(:).*ichc(:);
+
+        inan    = isnan(sum([iu kbold icong pcong pccong],2));
+        kbold   = kbold(~inan,:);
+        iu      = zscore(iu(~inan));
+        icong   = zscore(icong(~inan));
+        pcong   = zscore(pcong(~inan));
+        pccong  = zscore(pccong(~inan));
+
+
+        for i = 1:itr
+            y                       = zscore(kbold(:,i));
+            icoef                   = glmfit([icong pcong pccong],y);
+            coefs_cong(iSub,i,:)    = icoef(2:4);
+        end
+
+
+    end
+
+    signedR2_    = (R2(:,1) - R2(:,2:4)).*((coef_xhat(:,2:4) > 0) - 0.5)*2;
+    mR2(iroi,1:3) = mean(signedR2);
+    mR2(iroi,4:5) = mR2(iroi,2:3)./mR2(iroi,1);
+
+    %%
+
+    ls = {':','--','-'};
+    dx = [-1 0 1]*0.05;
+    lw = 1.2;
+    ms = 8;
+    fz = 15;
+
+    cl = lines(5);
+    cl = cl(3:5,:);
+
+    figure(1)
+    clf
+    sp1 = subplot(1,3,1);
+    hold on
+    for is = 1:3
+        irt         = squeeze(RTs(is,:,:))';
+        m           = mean(irt,'omitnan');
+        [~,~,ci]    = ttest(irt);
+        for i = 1:3
+            plot([1 1]*i+dx(is),ci(:,i),'k-_','LineWidth',lw)
+        end
+        plot((1:3)+dx(is),m,'ko','LineStyle',ls{is},'LineWidth',lw,'MarkerSize',ms,'MarkerFaceColor','w')
+    end
+    ylabel('normalized BOLD (z)')
+    %     xlabel('D(t)*S(t-1)')
+    set(gca,'xtick',1:3,'xticklabel',-1:1,'fontsize',fz,'ytick',-0.2:0.2:0.2)
+    ylim([-0.25 0.43])
+    xlim([0.7 3.2])
+    grid on
+    title(fmribold.iboldname{iroi})
+
+    sp2 = subplot(1,3,2);
+    hold on
+    m = mean(signedR2);
+    [~,~,ci] = ttest(signedR2);
+    for i = 1:3
+        bar(i,m(i),'FaceColor','w','EdgeColor',cl(i,:),'LineWidth',lw)
+        plot([i i],ci(:,i),'_-','LineWidth',lw,'Color',cl(i,:))
+    end
+    xlim([0 4])
+    ylim([-0.022 0.01])
+    grid on
+    set(gca,'xtick',1:3,'xticklabel',{'','',''},'fontsize',fz,'ytick',-0.015:0.005:0.005)
+    ylabel('signed R-squared')
+
+    sp3 = subplot(1,3,3);
+    hold on
+    m = mean(coefs);
+    [~,p,ci] = ttest(coefs);
+    n = length(m);
+    bar(1,m(1),'FaceColor','w','EdgeColor',cl(1,:),'LineWidth',lw)
+    bar(2:(1+nTB),m(2:(1+nTB)),'FaceColor','w','EdgeColor',cl(2,:),'LineWidth',lw)
+    bar((2+nTB):n,m((2+nTB):n),'FaceColor','w','EdgeColor',cl(3,:),'LineWidth',lw)
+    plot([1 1],ci(:,1),'_-','Color',cl(1,:),'LineWidth',lw)
+    for i = 1:nTB
+        plot([1 1]+i,ci(:,1+i),'_-','Color',cl(2,:),'LineWidth',lw)
+        plot([1 1]+nTB+i,ci(:,1+nTB+i),'_-','Color',cl(3,:),'LineWidth',lw)
+    end
+    idx = 0.3;
+    idy = 0.015;
+    for i = 1:n
+        ip = p(i);
+        if ip<0.05
+            if ip<0.001
+                ix = [-1 0 1]*idx;
+            elseif ip<0.01
+                ix = [-1 1]/2*idx;
+            else
+                ix = 0;
+            end
+            m = mean(ci(:,i));
+            if m > 0
+                plot(i+ix,ci(2,i)+idy,'k*','LineWidth',lw,'MarkerSize',ms)
+            else
+                plot(i+ix,ci(1,i)-idy,'k*','LineWidth',lw,'MarkerSize',ms)
+            end
+        end
+    end
+    set(gca,'xtick',[1 2 nTB+1 nTB+2 n],'xticklabel',[0 1 nTB 1 nTB],'fontsize',fz,'ytick',-0.2:0.1:0.1)
+    ylabel('reg. coef.')
+    %     xlabel('    D(t)*S(t-i)                 D(t)*D(t-i)  ')
+    ylim([-0.18 0.12])
+    xlim([0 n+1])
+    grid on
+
+    sp1.Position = sp1.Position.*[0.6 1.5 0.67 0.8];
+    sp2.Position = sp2.Position.*[0.87 1.5 0.7 0.8];
+    sp3.Position = sp3.Position.*[0.85 1.5 1.7 0.8];
+
+    set(gcf,'PaperUnits','inches','PaperPosition',[0 0 1600 500]/150)
+    saveas(gcf,['TB' num2str(nTB) '_' fmribold.iboldname{iroi} '.png'])
+
+end
+
